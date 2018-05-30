@@ -6,6 +6,7 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -77,6 +78,46 @@ func ledisHandle(w http.ResponseWriter, r *http.Request) {
 		store.Set(cmd.Args[0], cmd.Args[1])
 		writeBody(w, "OK")
 		return
+	case "LLEN":
+		if len(cmd.Args) != 1 {
+			respError(w, fmt.Errorf("LLEN expects 1 argument"))
+			return
+		}
+		writeBody(w, store.Llen(cmd.Args[0]))
+	case "RPUSH":
+		if len(cmd.Args) <= 1 {
+			respError(w, fmt.Errorf("RPUSH expects at least 2 arguments"))
+			return
+		}
+		writeBody(w, store.Rpush(cmd.Args[0], cmd.Args[1:]))
+	case "LPOP":
+		if len(cmd.Args) != 1 {
+			respError(w, fmt.Errorf("LPOP expects at least 2 arguments"))
+			return
+		}
+		writeBody(w, store.Lpop(cmd.Args[0]))
+	case "RPOP":
+		if len(cmd.Args) != 1 {
+			respError(w, fmt.Errorf("RPOP expects at least 2 arguments"))
+			return
+		}
+		writeBody(w, store.Rpop(cmd.Args[0]))
+	case "LRANGE":
+		if len(cmd.Args) != 3 {
+			respError(w, fmt.Errorf("RPOP expects 3 arguments"))
+			return
+		}
+		startIdx, err := strconv.ParseUint(cmd.Args[1], 10, 64)
+		if err != nil {
+			respError(w, fmt.Errorf("Error when parsing start"))
+			return
+		}
+		endIdx, err := strconv.ParseUint(cmd.Args[2], 10, 64)
+		if err != nil {
+			respError(w, fmt.Errorf("Error when parsing end"))
+			return
+		}
+		writeBody(w, store.Lrange(cmd.Args[0], startIdx, endIdx))
 	default:
 		respError(w, fmt.Errorf("unkonwn command: %s", cmd.Name))
 	}
@@ -118,9 +159,128 @@ func (store *ledisStore) Set(key string, val string) {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
+	// set always success, it even overwrite other data types
 	store.data[key] = ledisData{
 		dataType:   TypeString,
 		setData:    nil,
 		listData:   nil,
 		stringData: &val}
+}
+
+func (store *ledisStore) Llen(key string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	if store.data[key].dataType != TypeList {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	return fmt.Sprintf("%d", len(*store.data[key].listData))
+}
+
+func (store *ledisStore) Rpush(key string, values []string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	storeVal, ok := store.data[key]
+	if ok {
+		if storeVal.dataType != TypeList {
+			return "WRONGTYPE Operation against a key holding the wrong kind of value"
+		}
+
+		// append value
+		for _, val := range values {
+			*store.data[key].listData = append(*store.data[key].listData, val)
+		}
+		return fmt.Sprintf("%d", len(*storeVal.listData))
+	}
+
+	// create the list
+	store.data[key] = ledisData{
+		dataType:   TypeList,
+		setData:    nil,
+		listData:   &values,
+		stringData: nil}
+	return fmt.Sprintf("%d", len(values))
+}
+
+func (store *ledisStore) Lpop(key string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	// check if key is exist
+	storeVal, ok := store.data[key]
+	if !ok {
+		return "(nil)"
+	}
+
+	// if key is not list, return wrong type
+	if storeVal.dataType != TypeList {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	// else, lpop
+	if len(*storeVal.listData) == 0 {
+		return "(nil)"
+	}
+	retVal := (*storeVal.listData)[0]
+	*storeVal.listData = append((*storeVal.listData)[:0], (*storeVal.listData)[1:]...)
+	return retVal
+}
+
+func (store *ledisStore) Rpop(key string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	// check if key is exist
+	storeVal, ok := store.data[key]
+	if !ok {
+		return "(nil)"
+	}
+
+	// if key is not list, return wrong type
+	if storeVal.dataType != TypeList {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	// else, rpop
+	if len(*storeVal.listData) == 0 {
+		return "(nil)"
+	}
+	lastIdx := len(*storeVal.listData) - 1
+	retVal := (*storeVal.listData)[lastIdx]
+	*storeVal.listData = append((*storeVal.listData)[:lastIdx], (*storeVal.listData)[lastIdx+1:]...)
+	return retVal
+}
+
+func (store *ledisStore) Lrange(key string, start, stop uint64) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	// check if key is exist
+	storeVal, ok := store.data[key]
+	if !ok {
+		return "(nil)"
+	}
+
+	// if key is not list, return wrong type
+	if storeVal.dataType != TypeList {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	lenListData := uint64(len(*storeVal.listData))
+	if lenListData == 0 {
+		return "(nil)"
+	}
+
+	stopIdx := stop
+	if stopIdx >= lenListData {
+		stopIdx = lenListData
+	}
+
+	retStr := ""
+	for i := start; i < stopIdx; i++ {
+		retStr += (*storeVal.listData)[i] + "\r\n"
+	}
+	return retStr
 }
