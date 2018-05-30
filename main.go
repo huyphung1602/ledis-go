@@ -42,7 +42,7 @@ const (
 
 type ledisData struct {
 	dataType   ledisType
-	setData    *bool
+	setData    *map[string]bool
 	listData   *[]string
 	stringData *string
 }
@@ -118,6 +118,36 @@ func ledisHandle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeBody(w, store.Lrange(cmd.Args[0], startIdx, endIdx))
+	case "SADD":
+		if len(cmd.Args) <= 1 {
+			respError(w, fmt.Errorf("SADD expects at least 2 arguments"))
+			return
+		}
+		writeBody(w, store.Sadd(cmd.Args[0], cmd.Args[1:]))
+	case "SCARD":
+		if len(cmd.Args) != 1 {
+			respError(w, fmt.Errorf("SCARD expects 1 arguments"))
+			return
+		}
+		writeBody(w, store.Scard(cmd.Args[0]))
+	case "SMEMBERS":
+		if len(cmd.Args) != 1 {
+			respError(w, fmt.Errorf("SMEMBERS expects 1 arguments"))
+			return
+		}
+		writeBody(w, store.Smembers(cmd.Args[0]))
+	case "SREM":
+		if len(cmd.Args) <= 1 {
+			respError(w, fmt.Errorf("SREM expects at least 2 arguments"))
+			return
+		}
+		writeBody(w, store.Srem(cmd.Args[0], cmd.Args[1:]))
+	case "SINTER":
+		if len(cmd.Args) <= 1 {
+			respError(w, fmt.Errorf("SINTER expects at least 2 arguments"))
+			return
+		}
+		writeBody(w, store.Sinter(cmd.Args))
 	default:
 		respError(w, fmt.Errorf("unkonwn command: %s", cmd.Name))
 	}
@@ -283,4 +313,117 @@ func (store *ledisStore) Lrange(key string, start, stop uint64) string {
 		retStr += (*storeVal.listData)[i] + "\r\n"
 	}
 	return retStr
+}
+
+func (store *ledisStore) Sadd(key string, values []string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	count := 0
+	storeVal, ok := store.data[key]
+	if ok {
+		if storeVal.dataType != TypeSet {
+			return "WRONGTYPE Operation against a key holding the wrong kind of value"
+		}
+
+		// add item to set
+		setVals := *storeVal.setData
+		for _, val := range values {
+			if _, ok = setVals[val]; !ok {
+				count++
+			}
+			storeVal.setData = &setVals
+		}
+		return fmt.Sprintf("%d", count)
+	}
+
+	// not exist, create set
+	setVals := make(map[string]bool)
+	for _, val := range values {
+		if _, ok := setVals[val]; !ok {
+			count++
+		}
+		setVals[val] = true
+	}
+	store.data[key] = ledisData{
+		dataType:   TypeSet,
+		setData:    &setVals,
+		listData:   nil,
+		stringData: nil}
+	return fmt.Sprintf("%d", len(values))
+}
+
+func (store *ledisStore) Scard(key string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	count := 0
+	storeVal, ok := store.data[key]
+	if !ok {
+		return "0"
+	}
+	if storeVal.dataType != TypeSet {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	for _ = range *storeVal.setData {
+		count++
+	}
+	return fmt.Sprintf("%d", count)
+}
+
+func (store *ledisStore) Smembers(key string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	resStr := ""
+	storeVal, ok := store.data[key]
+	if !ok {
+		return "(empty set)"
+	}
+	if storeVal.dataType != TypeSet {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	if len(*storeVal.setData) == 0 {
+		return "(empty set)"
+	}
+
+	for key := range *storeVal.setData {
+		resStr += key + "\r\n"
+	}
+	return resStr
+}
+
+func (store *ledisStore) Srem(key string, values []string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	count := 0
+	storeVal, ok := store.data[key]
+	if !ok {
+		return "0"
+	}
+	if storeVal.dataType != TypeSet {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	if len(*storeVal.setData) == 0 {
+		return "0"
+	}
+
+	for _, val := range values {
+		if _, ok := (*storeVal.setData)[val]; ok {
+			count++
+			delete(*storeVal.setData, val)
+		}
+	}
+
+	return fmt.Sprintf("%d", count)
+}
+
+func (store *ledisStore) Sinter(key []string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+	return ""
 }
