@@ -230,6 +230,9 @@ func parseCommand(body string) (*command, error) {
 	if err != nil {
 		return nil, err
 	}
+	if len(args) < 1 {
+		return nil, fmt.Errorf("empty command")
+	}
 
 	return &command{Name: args[0], Args: args[1:]}, nil
 }
@@ -245,7 +248,7 @@ func (store *LedisStore) Get(key string) string {
 
 	storeVal, ok := store.Data[key]
 	if !ok {
-		return "(nil)"
+		return "key not found"
 	}
 	if storeVal.DataType != TypeString {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -312,10 +315,9 @@ func (store *LedisStore) Lpop(key string) string {
 	// check if key is exist
 	storeVal, ok := store.Data[key]
 	if !ok {
-		return "(nil)"
+		return "key not found"
 	}
 
-	// if key is not list, return wrong type
 	if storeVal.DataType != TypeList {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
@@ -336,7 +338,7 @@ func (store *LedisStore) Rpop(key string) string {
 	// check if key is exist
 	storeVal, ok := store.Data[key]
 	if !ok {
-		return "(nil)"
+		return "key not found"
 	}
 
 	// if key is not list, return wrong type
@@ -361,7 +363,7 @@ func (store *LedisStore) Lrange(key string, start, stop uint64) string {
 	// check if key is exist
 	storeVal, ok := store.Data[key]
 	if !ok {
-		return "(nil)"
+		return "key not found"
 	}
 
 	// if key is not list, return wrong type
@@ -402,9 +404,11 @@ func (store *LedisStore) Sadd(key string, values []string) string {
 		for _, val := range values {
 			if _, ok = setVals[val]; !ok {
 				count++
+				setVals[val] = true
 			}
-			storeVal.SetData = &setVals
 		}
+
+		storeVal.SetData = &setVals
 		return fmt.Sprintf("%d", count)
 	}
 
