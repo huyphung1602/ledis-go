@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	shellquote "github.com/kballard/go-shellquote"
 )
@@ -20,15 +21,33 @@ func main() {
 	addr := ":8080"
 
 	store = &ledisStore{
-		data: make(map[string]ledisData),
-		lock: &sync.RWMutex{},
+		data:   make(map[string]ledisData),
+		expire: make(map[string]int64),
+		lock:   &sync.RWMutex{},
 	}
 
+	go expiredCleaner()
 	http.HandleFunc("/", ledisHandle)
 
 	log.Printf("Accepting connections at: %s", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {
 		panic(err)
+	}
+}
+
+func expiredCleaner() {
+	for {
+		time.Sleep(500 * time.Millisecond)
+		store.lock.RLock()
+
+		timeNow := time.Now().Unix()
+		for key, val := range store.expire {
+			if val-timeNow <= 0 {
+				delete(store.expire, key)
+				delete(store.data, key)
+			}
+		}
+		store.lock.RUnlock()
 	}
 }
 
@@ -48,8 +67,9 @@ type ledisData struct {
 }
 
 type ledisStore struct {
-	data map[string]ledisData
-	lock *sync.RWMutex
+	data   map[string]ledisData
+	expire map[string]int64
+	lock   *sync.RWMutex
 }
 
 func ledisHandle(w http.ResponseWriter, r *http.Request) {
@@ -148,6 +168,37 @@ func ledisHandle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeBody(w, store.Sinter(cmd.Args))
+	case "KEYS":
+		writeBody(w, store.Keys())
+	case "DEL":
+		if len(cmd.Args) != 1 {
+			respError(w, fmt.Errorf("DEL expects 1 argument"))
+			return
+		}
+		writeBody(w, store.Del(cmd.Args[0]))
+	case "FLUSHDB":
+		writeBody(w, store.Flushdb())
+	case "EXPIRE":
+		if len(cmd.Args) != 2 {
+			respError(w, fmt.Errorf("EXPIRE expects 2 arguments"))
+			return
+		}
+		second, err := strconv.ParseInt(cmd.Args[1], 10, 64)
+		if err != nil {
+			respError(w, fmt.Errorf("Error when parsing end"))
+			return
+		}
+		if second <= 0 {
+			respError(w, fmt.Errorf("Second should be a positive number"))
+			return
+		}
+		writeBody(w, store.Expire(cmd.Args[0], second))
+	case "TTL":
+		if len(cmd.Args) != 1 {
+			respError(w, fmt.Errorf("TTL expects 1 argument"))
+			return
+		}
+		writeBody(w, store.Ttl(cmd.Args[0]))
 	default:
 		respError(w, fmt.Errorf("unkonwn command: %s", cmd.Name))
 	}
@@ -195,6 +246,8 @@ func (store *ledisStore) Set(key string, val string) {
 		setData:    nil,
 		listData:   nil,
 		stringData: &val}
+	// remove the expire if exist
+	delete(store.expire, key)
 }
 
 func (store *ledisStore) Llen(key string) string {
@@ -425,5 +478,68 @@ func (store *ledisStore) Srem(key string, values []string) string {
 func (store *ledisStore) Sinter(key []string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
+	// TODO: implement Sinter
 	return ""
+}
+
+func (store *ledisStore) Keys() string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	valRet := ""
+	for key := range store.data {
+		valRet += key + "\r\n"
+	}
+
+	if valRet == "" {
+		return "empty"
+	}
+	return valRet
+}
+
+func (store *ledisStore) Del(key string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	if _, ok := store.data[key]; !ok {
+		return "0"
+	}
+
+	delete(store.data, key)
+	return "1"
+}
+
+func (store *ledisStore) Flushdb() string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+	for key := range store.data {
+		delete(store.data, key)
+	}
+	return "OK"
+}
+
+func (store *ledisStore) Expire(key string, second int64) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	if _, ok := store.data[key]; !ok {
+		return "key not found"
+	}
+
+	store.expire[key] = time.Now().Unix() + second
+	return fmt.Sprintf("%d", second)
+}
+
+func (store *ledisStore) Ttl(key string) string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	if _, ok := store.data[key]; !ok {
+		return "key not found"
+	}
+	if _, ok := store.expire[key]; !ok {
+		return "-1"
+	}
+
+	return fmt.Sprintf("%d", store.expire[key]-time.Now().Unix())
 }
