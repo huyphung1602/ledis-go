@@ -497,11 +497,41 @@ func (store *LedisStore) Srem(key string, values []string) string {
 	return fmt.Sprintf("%d", count)
 }
 
-func (store *LedisStore) Sinter(key []string) string {
+func (store *LedisStore) Sinter(keys []string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
-	// TODO: implement Sinter
-	return ""
+
+	firstSet := *store.Data[keys[0]].SetData
+	for key := range firstSet {
+		firstSet[key] = true
+	}
+	for _, key := range keys {
+		storeVal, ok := store.Data[key]
+		if !ok {
+			return fmt.Sprintf("key not found: %s", key)
+		}
+		if storeVal.DataType != TypeSet {
+			return fmt.Sprintf("WRONGTYPE Operation against a key: %s holding the wrong kind of value", key)
+		}
+
+		for setVal := range firstSet {
+			if _, ok := (*storeVal.SetData)[setVal]; !ok {
+				firstSet[setVal] = false
+			}
+		}
+	}
+
+	resStr := ""
+	for key := range firstSet {
+		if firstSet[key] == true {
+			resStr += key + "\r\n"
+		}
+	}
+
+	if resStr == "" {
+		return "empty"
+	}
+	return resStr
 }
 
 func (store *LedisStore) Keys() string {
