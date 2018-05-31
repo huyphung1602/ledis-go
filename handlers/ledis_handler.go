@@ -107,19 +107,19 @@ func (h *LedisHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeBody(w, store.Rpush(cmd.Args[0], cmd.Args[1:]))
 	case "LPOP":
 		if len(cmd.Args) != 1 {
-			respError(w, fmt.Errorf("LPOP expects at least 2 arguments"))
+			respError(w, fmt.Errorf("LPOP expects 1 argument"))
 			return
 		}
 		writeBody(w, store.Lpop(cmd.Args[0]))
 	case "RPOP":
 		if len(cmd.Args) != 1 {
-			respError(w, fmt.Errorf("RPOP expects at least 2 arguments"))
+			respError(w, fmt.Errorf("RPOP expects 1 argument"))
 			return
 		}
 		writeBody(w, store.Rpop(cmd.Args[0]))
 	case "LRANGE":
 		if len(cmd.Args) != 3 {
-			respError(w, fmt.Errorf("RPOP expects 3 arguments"))
+			respError(w, fmt.Errorf("LRANGE expects 3 arguments"))
 			return
 		}
 		startIdx, err := strconv.ParseUint(cmd.Args[1], 10, 64)
@@ -180,7 +180,7 @@ func (h *LedisHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		second, err := strconv.ParseInt(cmd.Args[1], 10, 64)
 		if err != nil {
-			respError(w, fmt.Errorf("Error when parsing end"))
+			respError(w, fmt.Errorf("Error when parsing seconds"))
 			return
 		}
 		if second <= 0 {
@@ -426,7 +426,7 @@ func (store *LedisStore) Scard(key string) string {
 	count := 0
 	storeVal, ok := store.Data[key]
 	if !ok {
-		return "0"
+		return "key not found"
 	}
 	if storeVal.DataType != TypeSet {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -445,7 +445,7 @@ func (store *LedisStore) Smembers(key string) string {
 	resStr := ""
 	storeVal, ok := store.Data[key]
 	if !ok {
-		return "(empty set)"
+		return "key not found"
 	}
 	if storeVal.DataType != TypeSet {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -468,7 +468,7 @@ func (store *LedisStore) Srem(key string, values []string) string {
 	count := 0
 	storeVal, ok := store.Data[key]
 	if !ok {
-		return "0"
+		return "key not found"
 	}
 	if storeVal.DataType != TypeSet {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
@@ -545,7 +545,7 @@ func (store *LedisStore) Del(key string) string {
 	defer store.lock.Unlock()
 
 	if _, ok := store.Data[key]; !ok {
-		return "0"
+		return "key not found"
 	}
 
 	delete(store.Data, key)
