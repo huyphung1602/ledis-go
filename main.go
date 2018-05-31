@@ -1,11 +1,13 @@
 package main
 
 import (
+	"encoding/gob"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,16 +16,16 @@ import (
 	shellquote "github.com/kballard/go-shellquote"
 )
 
-var store *ledisStore
+var store *LedisStore
 
 func main() {
 	log.Printf("Ledis server started\n")
 	addr := ":8080"
 
-	store = &ledisStore{
-		data:   make(map[string]ledisData),
-		expire: make(map[string]int64),
-		lock:   &sync.RWMutex{},
+	store = &LedisStore{
+		Data:       make(map[string]LedisData),
+		ExpireTime: make(map[string]int64),
+		lock:       &sync.RWMutex{},
 	}
 
 	go expiredCleaner()
@@ -41,10 +43,10 @@ func expiredCleaner() {
 		store.lock.RLock()
 
 		timeNow := time.Now().Unix()
-		for key, val := range store.expire {
+		for key, val := range store.ExpireTime {
 			if val-timeNow <= 0 {
-				delete(store.expire, key)
-				delete(store.data, key)
+				delete(store.ExpireTime, key)
+				delete(store.Data, key)
 			}
 		}
 		store.lock.RUnlock()
@@ -59,17 +61,17 @@ const (
 	TypeString
 )
 
-type ledisData struct {
-	dataType   ledisType
-	setData    *map[string]bool
-	listData   *[]string
-	stringData *string
+type LedisData struct {
+	DataType   ledisType
+	SetData    *map[string]bool
+	ListData   *[]string
+	StringData *string
 }
 
-type ledisStore struct {
-	data   map[string]ledisData
-	expire map[string]int64
-	lock   *sync.RWMutex
+type LedisStore struct {
+	Data       map[string]LedisData
+	ExpireTime map[string]int64
+	lock       *sync.RWMutex
 }
 
 func ledisHandle(w http.ResponseWriter, r *http.Request) {
@@ -199,6 +201,10 @@ func ledisHandle(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeBody(w, store.Ttl(cmd.Args[0]))
+	case "SAVE":
+		writeBody(w, store.Save())
+	case "RESTORE":
+		writeBody(w, store.Restore())
 	default:
 		respError(w, fmt.Errorf("unkonwn command: %s", cmd.Name))
 	}
@@ -226,132 +232,137 @@ func parseCommand(body string) (*command, error) {
 	return &command{Name: args[0], Args: args[1:]}, nil
 }
 
-func (store *ledisStore) Get(key string) string {
+func (store *LedisStore) Get(key string) string {
 	store.lock.RLock()
 	defer store.lock.RUnlock()
 
-	if store.data[key].stringData == nil {
+	storeVal, ok := store.Data[key]
+	if !ok {
 		return "(nil)"
 	}
-	return *store.data[key].stringData
+	if storeVal.DataType != TypeString {
+		return "WRONGTYPE Operation against a key holding the wrong kind of value"
+	}
+
+	return *storeVal.StringData
 }
 
-func (store *ledisStore) Set(key string, val string) {
+func (store *LedisStore) Set(key string, val string) {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	// set always success, it even overwrite other data types
-	store.data[key] = ledisData{
-		dataType:   TypeString,
-		setData:    nil,
-		listData:   nil,
-		stringData: &val}
+	store.Data[key] = LedisData{
+		DataType:   TypeString,
+		SetData:    nil,
+		ListData:   nil,
+		StringData: &val}
 	// remove the expire if exist
-	delete(store.expire, key)
+	delete(store.ExpireTime, key)
 }
 
-func (store *ledisStore) Llen(key string) string {
+func (store *LedisStore) Llen(key string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
-	if store.data[key].dataType != TypeList {
+	if store.Data[key].DataType != TypeList {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
 
-	return fmt.Sprintf("%d", len(*store.data[key].listData))
+	return fmt.Sprintf("%d", len(*store.Data[key].ListData))
 }
 
-func (store *ledisStore) Rpush(key string, values []string) string {
+func (store *LedisStore) Rpush(key string, values []string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if ok {
-		if storeVal.dataType != TypeList {
+		if storeVal.DataType != TypeList {
 			return "WRONGTYPE Operation against a key holding the wrong kind of value"
 		}
 
 		// append value
 		for _, val := range values {
-			*store.data[key].listData = append(*store.data[key].listData, val)
+			*store.Data[key].ListData = append(*store.Data[key].ListData, val)
 		}
-		return fmt.Sprintf("%d", len(*storeVal.listData))
+		return fmt.Sprintf("%d", len(*storeVal.ListData))
 	}
 
 	// create the list
-	store.data[key] = ledisData{
-		dataType:   TypeList,
-		setData:    nil,
-		listData:   &values,
-		stringData: nil}
+	store.Data[key] = LedisData{
+		DataType:   TypeList,
+		SetData:    nil,
+		ListData:   &values,
+		StringData: nil}
 	return fmt.Sprintf("%d", len(values))
 }
 
-func (store *ledisStore) Lpop(key string) string {
+func (store *LedisStore) Lpop(key string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	// check if key is exist
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if !ok {
 		return "(nil)"
 	}
 
 	// if key is not list, return wrong type
-	if storeVal.dataType != TypeList {
+	if storeVal.DataType != TypeList {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
 
 	// else, lpop
-	if len(*storeVal.listData) == 0 {
+	if len(*storeVal.ListData) == 0 {
 		return "(nil)"
 	}
-	retVal := (*storeVal.listData)[0]
-	*storeVal.listData = append((*storeVal.listData)[:0], (*storeVal.listData)[1:]...)
+	retVal := (*storeVal.ListData)[0]
+	*storeVal.ListData = append((*storeVal.ListData)[:0], (*storeVal.ListData)[1:]...)
 	return retVal
 }
 
-func (store *ledisStore) Rpop(key string) string {
+func (store *LedisStore) Rpop(key string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	// check if key is exist
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if !ok {
 		return "(nil)"
 	}
 
 	// if key is not list, return wrong type
-	if storeVal.dataType != TypeList {
+	if storeVal.DataType != TypeList {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
 
 	// else, rpop
-	if len(*storeVal.listData) == 0 {
+	if len(*storeVal.ListData) == 0 {
 		return "(nil)"
 	}
-	lastIdx := len(*storeVal.listData) - 1
-	retVal := (*storeVal.listData)[lastIdx]
-	*storeVal.listData = append((*storeVal.listData)[:lastIdx], (*storeVal.listData)[lastIdx+1:]...)
+	lastIdx := len(*storeVal.ListData) - 1
+	retVal := (*storeVal.ListData)[lastIdx]
+	*storeVal.ListData = append((*storeVal.ListData)[:lastIdx], (*storeVal.ListData)[lastIdx+1:]...)
 	return retVal
 }
 
-func (store *ledisStore) Lrange(key string, start, stop uint64) string {
+func (store *LedisStore) Lrange(key string, start, stop uint64) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	// check if key is exist
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if !ok {
 		return "(nil)"
 	}
 
 	// if key is not list, return wrong type
-	if storeVal.dataType != TypeList {
+	if storeVal.DataType != TypeList {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
 
-	lenListData := uint64(len(*storeVal.listData))
+	lenListData := uint64(len(*storeVal.ListData))
 	if lenListData == 0 {
 		return "(nil)"
 	}
@@ -363,29 +374,29 @@ func (store *ledisStore) Lrange(key string, start, stop uint64) string {
 
 	retStr := ""
 	for i := start; i < stopIdx; i++ {
-		retStr += (*storeVal.listData)[i] + "\r\n"
+		retStr += (*storeVal.ListData)[i] + "\r\n"
 	}
 	return retStr
 }
 
-func (store *ledisStore) Sadd(key string, values []string) string {
+func (store *LedisStore) Sadd(key string, values []string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	count := 0
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if ok {
-		if storeVal.dataType != TypeSet {
+		if storeVal.DataType != TypeSet {
 			return "WRONGTYPE Operation against a key holding the wrong kind of value"
 		}
 
 		// add item to set
-		setVals := *storeVal.setData
+		setVals := *storeVal.SetData
 		for _, val := range values {
 			if _, ok = setVals[val]; !ok {
 				count++
 			}
-			storeVal.setData = &setVals
+			storeVal.SetData = &setVals
 		}
 		return fmt.Sprintf("%d", count)
 	}
@@ -398,96 +409,96 @@ func (store *ledisStore) Sadd(key string, values []string) string {
 		}
 		setVals[val] = true
 	}
-	store.data[key] = ledisData{
-		dataType:   TypeSet,
-		setData:    &setVals,
-		listData:   nil,
-		stringData: nil}
+	store.Data[key] = LedisData{
+		DataType:   TypeSet,
+		SetData:    &setVals,
+		ListData:   nil,
+		StringData: nil}
 	return fmt.Sprintf("%d", len(values))
 }
 
-func (store *ledisStore) Scard(key string) string {
+func (store *LedisStore) Scard(key string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	count := 0
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if !ok {
 		return "0"
 	}
-	if storeVal.dataType != TypeSet {
+	if storeVal.DataType != TypeSet {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
 
-	for _ = range *storeVal.setData {
+	for _ = range *storeVal.SetData {
 		count++
 	}
 	return fmt.Sprintf("%d", count)
 }
 
-func (store *ledisStore) Smembers(key string) string {
+func (store *LedisStore) Smembers(key string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	resStr := ""
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if !ok {
 		return "(empty set)"
 	}
-	if storeVal.dataType != TypeSet {
+	if storeVal.DataType != TypeSet {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
 
-	if len(*storeVal.setData) == 0 {
+	if len(*storeVal.SetData) == 0 {
 		return "(empty set)"
 	}
 
-	for key := range *storeVal.setData {
+	for key := range *storeVal.SetData {
 		resStr += key + "\r\n"
 	}
 	return resStr
 }
 
-func (store *ledisStore) Srem(key string, values []string) string {
+func (store *LedisStore) Srem(key string, values []string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	count := 0
-	storeVal, ok := store.data[key]
+	storeVal, ok := store.Data[key]
 	if !ok {
 		return "0"
 	}
-	if storeVal.dataType != TypeSet {
+	if storeVal.DataType != TypeSet {
 		return "WRONGTYPE Operation against a key holding the wrong kind of value"
 	}
 
-	if len(*storeVal.setData) == 0 {
+	if len(*storeVal.SetData) == 0 {
 		return "0"
 	}
 
 	for _, val := range values {
-		if _, ok := (*storeVal.setData)[val]; ok {
+		if _, ok := (*storeVal.SetData)[val]; ok {
 			count++
-			delete(*storeVal.setData, val)
+			delete(*storeVal.SetData, val)
 		}
 	}
 
 	return fmt.Sprintf("%d", count)
 }
 
-func (store *ledisStore) Sinter(key []string) string {
+func (store *LedisStore) Sinter(key []string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 	// TODO: implement Sinter
 	return ""
 }
 
-func (store *ledisStore) Keys() string {
+func (store *LedisStore) Keys() string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
 	valRet := ""
-	for key := range store.data {
+	for key := range store.Data {
 		valRet += key + "\r\n"
 	}
 
@@ -497,49 +508,100 @@ func (store *ledisStore) Keys() string {
 	return valRet
 }
 
-func (store *ledisStore) Del(key string) string {
+func (store *LedisStore) Del(key string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
-	if _, ok := store.data[key]; !ok {
+	if _, ok := store.Data[key]; !ok {
 		return "0"
 	}
 
-	delete(store.data, key)
+	delete(store.Data, key)
 	return "1"
 }
 
-func (store *ledisStore) Flushdb() string {
+func (store *LedisStore) Flushdb() string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
-	for key := range store.data {
-		delete(store.data, key)
+	for key := range store.Data {
+		delete(store.Data, key)
 	}
 	return "OK"
 }
 
-func (store *ledisStore) Expire(key string, second int64) string {
+func (store *LedisStore) Expire(key string, second int64) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
-	if _, ok := store.data[key]; !ok {
+	if _, ok := store.Data[key]; !ok {
 		return "key not found"
 	}
 
-	store.expire[key] = time.Now().Unix() + second
+	store.ExpireTime[key] = time.Now().Unix() + second
 	return fmt.Sprintf("%d", second)
 }
 
-func (store *ledisStore) Ttl(key string) string {
+func (store *LedisStore) Ttl(key string) string {
 	store.lock.Lock()
 	defer store.lock.Unlock()
 
-	if _, ok := store.data[key]; !ok {
+	if _, ok := store.Data[key]; !ok {
 		return "key not found"
 	}
-	if _, ok := store.expire[key]; !ok {
+	if _, ok := store.ExpireTime[key]; !ok {
 		return "-1"
 	}
 
-	return fmt.Sprintf("%d", store.expire[key]-time.Now().Unix())
+	return fmt.Sprintf("%d", store.ExpireTime[key]-time.Now().Unix())
+}
+
+func (store *LedisStore) Save() string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+	encodeFile, err := os.Create("accounts.gob")
+	if err != nil {
+		return err.Error()
+	}
+
+	e := gob.NewEncoder(encodeFile)
+
+	err = e.Encode(store)
+	if err != nil {
+		return err.Error()
+	}
+
+	return "OK"
+}
+
+func (store *LedisStore) Restore() string {
+	store.lock.Lock()
+	defer store.lock.Unlock()
+
+	// Open a RO file
+	decodeFile, err := os.Open("accounts.gob")
+	if err != nil {
+		return err.Error()
+	}
+	defer decodeFile.Close()
+
+	var decodedMap LedisStore
+	d := gob.NewDecoder(decodeFile)
+
+	// Decoding the serialized data
+	err = d.Decode(&decodedMap)
+	if err != nil {
+		return err.Error()
+	}
+
+	// restore all keys in the decodedMap
+	for key, val := range decodedMap.Data {
+		delete(store.Data, key)
+		store.Data[key] = val
+	}
+	for key, val := range decodedMap.ExpireTime {
+		delete(store.ExpireTime, key)
+		store.ExpireTime[key] = val
+	}
+
+	return "OK"
 }
