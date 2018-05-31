@@ -30,6 +30,7 @@ func main() {
 
 	go expiredCleaner()
 	http.HandleFunc("/", ledisHandle)
+	http.Handle("/cli/", http.StripPrefix("/cli/", http.FileServer(http.Dir("./public"))))
 
 	log.Printf("Accepting connections at: %s", addr)
 	if err := http.ListenAndServe(addr, nil); err != nil {

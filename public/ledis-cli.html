@@ -1,0 +1,102 @@
+<!doctype html>
+<html>
+<head>
+<title>Ledis-web-cli</title>
+<style>
+  html {
+    background: #555;
+  }
+
+  h1 {
+    margin-bottom: 20px;
+    font: 20px/1.5 sans-serif;
+  }
+
+</style>
+<script src="term.js"></script>
+<script src="https://ajax.googleapis.com/ajax/libs/jquery/3.3.1/jquery.min.js"></script>
+</head>
+<body>
+
+<div style="display:inline-block; vertical-align:top;">
+<div id="term">
+</div>
+</div>
+
+<br clear="both" />
+<i>Terminal widget should be focused (text cursor visible) to accept input. Click on it if not.</i><br/>
+</body>
+
+<script>
+;
+
+var term;
+var line = "";
+
+function calculate_size(win) {
+  var cols = Math.max(80, Math.min(150, (win.innerWidth - 280) / 7)) | 0;
+  var rows = Math.max(24, Math.min(80, (win.innerHeight - 180) / 12)) | 0;
+  return [cols, rows];
+}
+
+(function() {
+  window.onload = function() {
+    var size = calculate_size(self);
+    term = new Terminal({
+      cols: size[0],
+      rows: size[1],
+      useStyle: true,
+      screenKeys: true,
+      cursorBlink: false
+    });
+    term.open(document.getElementById("term"));
+
+	  var shellprompt = '$ ';
+
+	  term.prompt = function () {
+	    term.write('\r\n' + shellprompt);
+	  };
+
+	  term.prompt();
+
+	  term.on('key', function (key, ev) {
+	    var printable = (
+	      !ev.altKey && !ev.altGraphKey && !ev.ctrlKey && !ev.metaKey &&
+	      // won't allow arrow key
+	      !(ev.keyCode == 37) && !(ev.keyCode == 38) && !(ev.keyCode == 39) && !(ev.keyCode == 40)
+	    );
+
+	    if (ev.keyCode == 13) {
+	    	term.write("\r\n");
+	    	$.post("/", line, function(data, status){
+	    		term.write(data)
+	    		term.prompt();
+    		});
+    		line = "";
+	    } else if (ev.keyCode == 8) {
+	     	// Do not delete the prompt
+	      if (term.x > 2) {
+	        term.write('\b \b');
+	        line = line.slice(0, -1);
+	      }
+	    } else if (printable) {
+	      term.write(key);
+	      line += key
+	    }
+	  });
+
+	  term.on('paste', function (data, ev) {
+	    term.write(data);
+	    line += data
+	  });
+  };
+
+  window.addEventListener('resize', function() {
+    var size = calculate_size(self);
+    term.resize(size[0], size[1]);
+  });
+}).call(this);
+
+</script>
+
+</html>
