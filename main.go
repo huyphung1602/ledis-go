@@ -79,9 +79,11 @@ func ledisHandle(w http.ResponseWriter, r *http.Request) {
 	body, _ := ioutil.ReadAll(r.Body)
 	bodyStr := string(body[:])
 
+	setHTTPStatus(w)
 	cmd, err := parseCommand(bodyStr)
 	if err != nil {
-		log.Printf("body: %v", err)
+		respError(w, err)
+		return
 	}
 
 	switch strings.ToUpper(cmd.Name) {
@@ -230,6 +232,11 @@ func parseCommand(body string) (*command, error) {
 	}
 
 	return &command{Name: args[0], Args: args[1:]}, nil
+}
+
+func setHTTPStatus(w http.ResponseWriter) {
+	w.Header().Add("Access-Control-Allow-Origin", `*`)
+	w.Header().Add("Access-Control-Allow-Methods", `GET, POST, PUT, DELETE, OPTIONS`)
 }
 
 func (store *LedisStore) Get(key string) string {
